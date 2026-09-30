@@ -1,91 +1,110 @@
-# Terraform module AWS OIDC integration GitHub Actions
+# Terraform module — AWS OIDC plan/apply roles for GitHub Actions
 
-This [Terraform](https://www.terraform.io/) module manages OpenID Connect (OIDC) integration between [GitHub Actions and AWS](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services).
+This [Terraform](https://www.terraform.io/) module manages OpenID Connect (OIDC)
+integration between [GitHub Actions and AWS](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services).
+
+It is an opinionated fork of
+[philips-labs/terraform-aws-github-oidc](https://github.com/philips-labs/terraform-aws-github-oidc)
+reshaped for a hardened two-role plan/apply workflow.
 
 ## Description
 
-The module is strict on the claim checks to avoid that creating an OpenID connect integration opens your AWS account to any GitHub repo. However this strictness is not taking all the risk away. Ensure you familiarize yourself with OpenID Connect and the docs provided by GitHub and AWS. As always think about minimizing the privileges.
+For one repository the module creates **two roles**:
 
-The module can manage the following:
+- **plan** — assumable only from the mainline branch
+  (`sub` = `repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/<mainline_branch>`).
+- **apply** — assumable by any token whose `sub` is
+  `repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<apply_environment>`. The
+  module does **not** check the branch or event; the GitHub environment's
+  deployment-branch rule and required reviewers are what keep apply off pull
+  requests and non-mainline branches.
 
-- The OpenID Connect identity provider for GitHub in your AWS account (via a submodule).
-- A role and assume role policy to check to check OIDC claims.
+Hardening choices:
 
-### Manage the OIDC identity provider
+- **Exact subject match** with `StringEquals` (never `StringLike`); no wildcards.
+- **Immutable subject** — the numeric owner and repository IDs are baked into the
+  subject, so a recycled org/repo name cannot assume the role. See GitHub's
+  [immutable subject claims](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/).
+  This requires the repo to emit the immutable subject: repositories **created,
+  renamed, or transferred on/after 2026-07-15**, or existing repositories that
+  **opt in** at the repo/org level. Repositories still on the legacy name-only
+  `sub` (`repo:<owner>/<repo>:...`) are denied by these roles until they adopt it.
+- **Audience pinned** to `sts.amazonaws.com`.
+- **No trust widening** — this fork intentionally drops the upstream
+  `account_ids` / `custom_principal_arns` / `allow_all` knobs. The roles trust
+  only the repository's own OIDC token. `additional_trust_conditions` adds
+  further claim checks to tighten trust; it rejects a `StringEquals` block on
+  `:sub`/`:aud` (which would merge-OR into the module's own checks and widen
+  them), while a different operator such as `StringNotEquals` is allowed.
+- **No baked-in permissions** — the module attaches policies you supply via
+  `plan_role_policy_arns` / `apply_role_policy_arns` and owns none itself.
+- **Environment is the branch gate for `apply`** — the `apply` subject
+  (`:environment:<apply_environment>`) has no branch component, so *any* branch
+  deploying to that environment can assume the apply role. Protect the
+  environment with **required reviewers** and **deployment-branch restrictions**
+  (limit it to the mainline branch); the trust policy itself does not scope by
+  branch.
 
-The module provides an option for creating an OpenID connect provider. Using the internal `provider` module to create the OpenID Connect provider. This configuration will create the provider and output the ARN. This output can be passed to other instances of the module to setup roles for repositories on the same provider. Alternative you can create the OpenID connect provider via the resource [aws_iam_openid_connect_provider](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_openid_connect_provider) or in case you have an existing one look-up via the data source [aws_iam_openid_connect_provider](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_openid_connect_provider).
+The OIDC identity provider is one resource per AWS account. Create it once with
+the [`./modules/provider`](modules/provider) submodule and pass its ARN to every
+instance of the root module, or reference an existing provider.
 
-### Manage roles for a repo
-
-The module creates a role with an assume role policy to check the OIDC claims for the given repo. Be default the policy is set to only allow actions running on the main branch and deny pull request actions. You can choose based on your need one (or more) of the default conditions to check. Additionally, a list of conditions can be provided. The role can only be assumed when all conditions evaluate to true. The following default conditions can be set.
-
-- `allow_main` : Allow GitHub Actions only running on the main branch.
-- `allow_environment`: Allow GitHub Actions only for environments, by setting `github_environments` you can limit to a dedicated environment.
-- `deny_pull_request`: Denies assuming the role for a pull request.
-- `allow_all` : Allow GitHub Actions for any claim for the repository. Be careful, this allows forks as well to assume the role!
-
-## Required GitHub Workflows Permissions
-
-When configuring GitHub workflows to use this module, you need to specify the following permissions in your workflow configuration:
+## Required GitHub workflow permissions
 
 ```yaml
 permissions:
   id-token: write
+  contents: read
 ```
 
-This permission is required for the GitHub Actions to be able to assume the IAM role created by this module.
+## Usage
 
-## Usages
-
-In case there is not OpenID Connect provider already created in the AWS account, create one via the submodule.
+Create the provider once per account:
 
 ```hcl
 module "oidc_provider" {
-  source = "github.com/philips-labs/terraform-aws-github-oidc?ref=<version>//modules/provider"
+  source = "git::https://github.com/DgxSparkLabs/terraform-aws-github-oidc.git//modules/provider?ref=<tag>"
 }
 ```
 
-Nest you ca pass the output the one or multiple instances of the module.
+Create the plan/apply roles for a repository:
 
 ```hcl
-module "oidc_repo_s3" {
-  source = "github.com/philips-labs/terraform-aws-github-oidc?ref=<version>"
+module "github_oidc" {
+  source = "git::https://github.com/DgxSparkLabs/terraform-aws-github-oidc.git?ref=<tag>"
 
-  openid_connect_provider_arn = module.oidc_provider.openid_connect_provider.arn
-  repo                        = var.repo_s3
-  role_name                   = "repo-s3"
+  openid_connect_provider_arn = module.oidc_provider.arn
 
-  # optional
-  # override default conditions
-  default_conditions          = ["allow_main"]
+  github_owner      = "my-org"
+  github_owner_id   = "111111"
+  github_repo       = "my-repo"
+  github_repo_id    = "222222"
+  apply_environment = "production"
 
-  # add extra conditions, will be merged with the default_conditions
-  conditions                  = [{
-    test = "StringLike"
-    variable = "token.actions.githubusercontent.com:sub"
-    values = ["repo:my-org/my-repo:pull_request"]
-  }]
+  # Permissions attached externally; the module owns none.
+  plan_role_policy_arns  = [aws_iam_policy.plan.arn]
+  apply_role_policy_arns = [aws_iam_policy.apply.arn]
 }
 ```
 
 ## Examples
 
-Check out the [example](examples/default/README.md) for a full example of using the module.
+- Terraform: [`examples/default`](examples/default/README.md) — provider + plan/apply roles for one repository.
+- GitHub Actions consumer: [`examples/repositories/plan-apply`](examples/repositories/plan-apply/README.md) — a workflow that assumes the plan role on a push to main and the apply role from a protected environment.
 
 <!-- BEGINNING OF PRE-COMMIT-TERRAFORM DOCS HOOK -->
 ## Requirements
 
 | Name | Version |
 |------|---------|
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1 |
-| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 3 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.3 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 6.0 |
 
 ## Providers
 
 | Name | Version |
 |------|---------|
-| <a name="provider_aws"></a> [aws](#provider\_aws) | >= 3 |
-| <a name="provider_random"></a> [random](#provider\_random) | n/a |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.0 |
 
 ## Modules
 
@@ -95,35 +114,41 @@ No modules.
 
 | Name | Type |
 |------|------|
-| [aws_iam_role.main](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
-| [aws_iam_role_policy_attachment.custom](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy_attachment) | resource |
-| [random_string.random](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/string) | resource |
-| [aws_iam_policy_document.github_actions_assume_role_policy](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_role.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
+| [aws_iam_role_policy_attachment.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy_attachment) | resource |
+| [aws_iam_policy_document.assume_role](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
-| <a name="input_account_ids"></a> [account\_ids](#input\_account\_ids) | Root users of these Accounts (id) would be given the permissions to assume the role created by this module. | `list(string)` | `[]` | no |
-| <a name="input_conditions"></a> [conditions](#input\_conditions) | (Optional) Additonal conditions for checking the OIDC claim. | <pre>list(object({<br>    test     = string<br>    variable = string<br>    values   = list(string)<br>  }))</pre> | `[]` | no |
-| <a name="input_custom_principal_arns"></a> [custom\_principal\_arns](#input\_custom\_principal\_arns) | List of IAM principals ARNs able to assume the role created by this module. | `list(string)` | `[]` | no |
-| <a name="input_default_conditions"></a> [default\_conditions](#input\_default\_conditions) | (Optional) Default condtions to apply, at least one of the following is madatory: 'allow\_main', 'allow\_environment', 'deny\_pull\_request' and 'allow\_all'. | `list(string)` | <pre>[<br>  "allow_main",<br>  "deny_pull_request"<br>]</pre> | no |
-| <a name="input_github_environments"></a> [github\_environments](#input\_github\_environments) | (Optional) Allow GitHub action to deploy to all (default) or to one of the environments in the list. | `list(string)` | <pre>[<br>  "*"<br>]</pre> | no |
-| <a name="input_github_oidc_issuer"></a> [github\_oidc\_issuer](#input\_github\_oidc\_issuer) | OIDC issuer for GitHub Actions | `string` | `"token.actions.githubusercontent.com"` | no |
-| <a name="input_openid_connect_provider_arn"></a> [openid\_connect\_provider\_arn](#input\_openid\_connect\_provider\_arn) | Set the openid connect provider ARN when the provider is not managed by the module. | `string` | n/a | yes |
-| <a name="input_repo"></a> [repo](#input\_repo) | (Optional) GitHub repository to grant access to assume a role via OIDC. When the repo is set, a role will be created. | `string` | `null` | no |
-| <a name="input_role_max_session_duration"></a> [role\_max\_session\_duration](#input\_role\_max\_session\_duration) | Maximum session duration (in seconds) that you want to set for the specified role. | `number` | `null` | no |
-| <a name="input_role_name"></a> [role\_name](#input\_role\_name) | (Optional) role name of the created role, if not provided the `namespace` will be used. | `string` | `null` | no |
-| <a name="input_role_path"></a> [role\_path](#input\_role\_path) | (Optional) Path for the created role, requires `repo` is set. | `string` | `"/github-actions/"` | no |
-| <a name="input_role_permissions_boundary"></a> [role\_permissions\_boundary](#input\_role\_permissions\_boundary) | (Optional) Boundary for the created role, requires `repo` is set. | `string` | `null` | no |
-| <a name="input_role_policy_arns"></a> [role\_policy\_arns](#input\_role\_policy\_arns) | List of ARNs of IAM policies to attach to IAM role | `list(string)` | `[]` | no |
+| <a name="input_openid_connect_provider_arn"></a> [openid\_connect\_provider\_arn](#input\_openid\_connect\_provider\_arn) | ARN of the GitHub Actions OIDC provider. | `string` | n/a | yes |
+| <a name="input_github_owner"></a> [github\_owner](#input\_github\_owner) | GitHub owner login (e.g. "my-org"). | `string` | n/a | yes |
+| <a name="input_github_owner_id"></a> [github\_owner\_id](#input\_github\_owner\_id) | Immutable numeric GitHub owner (account) ID. | `string` | n/a | yes |
+| <a name="input_github_repo"></a> [github\_repo](#input\_github\_repo) | Repository name (no owner prefix). | `string` | n/a | yes |
+| <a name="input_github_repo_id"></a> [github\_repo\_id](#input\_github\_repo\_id) | Immutable numeric GitHub repository ID. | `string` | n/a | yes |
+| <a name="input_apply_environment"></a> [apply\_environment](#input\_apply\_environment) | Protected GitHub environment the apply role trusts. | `string` | n/a | yes |
+| <a name="input_mainline_branch"></a> [mainline\_branch](#input\_mainline\_branch) | Branch the plan role trusts. | `string` | `"main"` | no |
+| <a name="input_plan_role_policy_arns"></a> [plan\_role\_policy\_arns](#input\_plan\_role\_policy\_arns) | IAM policy ARNs attached to the plan role. | `list(string)` | `[]` | no |
+| <a name="input_apply_role_policy_arns"></a> [apply\_role\_policy\_arns](#input\_apply\_role\_policy\_arns) | IAM policy ARNs attached to the apply role. | `list(string)` | `[]` | no |
+| <a name="input_plan_role_name"></a> [plan\_role\_name](#input\_plan\_role\_name) | (Optional) Name of the plan role. Defaults to "<github\_repo>-plan". | `string` | `null` | no |
+| <a name="input_apply_role_name"></a> [apply\_role\_name](#input\_apply\_role\_name) | (Optional) Name of the apply role. Defaults to "<github\_repo>-apply". | `string` | `null` | no |
+| <a name="input_role_path"></a> [role\_path](#input\_role\_path) | Path for both created roles. | `string` | `"/github-actions/"` | no |
+| <a name="input_role_permissions_boundary"></a> [role\_permissions\_boundary](#input\_role\_permissions\_boundary) | (Optional) Permissions boundary ARN applied to both roles. | `string` | `null` | no |
+| <a name="input_role_max_session_duration"></a> [role\_max\_session\_duration](#input\_role\_max\_session\_duration) | (Optional) Maximum session duration (seconds) for both roles. | `number` | `null` | no |
+| <a name="input_additional_trust_conditions"></a> [additional\_trust\_conditions](#input\_additional\_trust\_conditions) | (Optional) Extra IAM condition blocks to tighten both roles' trust. A `StringEquals` block on `:sub`/`:aud` is rejected (it would merge-OR and widen); a different operator such as `StringNotEquals` is allowed. | <pre>list(object({<br>    test     = string<br>    variable = string<br>    values   = list(string)<br>  }))</pre> | `[]` | no |
+| <a name="input_github_oidc_issuer"></a> [github\_oidc\_issuer](#input\_github\_oidc\_issuer) | OIDC issuer host used as the claim prefix. | `string` | `"token.actions.githubusercontent.com"` | no |
+| <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to both roles. | `map(string)` | `{}` | no |
 
 ## Outputs
 
 | Name | Description |
 |------|-------------|
-| <a name="output_conditions"></a> [conditions](#output\_conditions) | The assume conditions added to the role. |
-| <a name="output_role"></a> [role](#output\_role) | The crated role that can be assumed for the configured repository. |
+| <a name="output_plan_role"></a> [plan\_role](#output\_plan\_role) | The plan role. |
+| <a name="output_apply_role"></a> [apply\_role](#output\_apply\_role) | The apply role. |
+| <a name="output_plan_role_arn"></a> [plan\_role\_arn](#output\_plan\_role\_arn) | ARN of the plan role. |
+| <a name="output_apply_role_arn"></a> [apply\_role\_arn](#output\_apply\_role\_arn) | ARN of the apply role. |
+| <a name="output_subjects"></a> [subjects](#output\_subjects) | The exact OIDC subject each role trusts. |
 <!-- END OF PRE-COMMIT-TERRAFORM DOCS HOOK -->
 
 ## Contribution

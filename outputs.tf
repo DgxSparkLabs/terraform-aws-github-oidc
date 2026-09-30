@@ -1,9 +1,24 @@
-output "role" {
-  description = "The crated role that can be assumed for the configured repository."
-  value       = var.repo != null ? aws_iam_role.main[0] : null
+output "plan_role" {
+  description = "The plan role. Trusts the OIDC token from pushes to the mainline branch."
+  value       = aws_iam_role.this["plan"]
 }
 
-output "conditions" {
-  description = "The assume conditions added to the role."
-  value       = local.merge_conditions
+output "apply_role" {
+  description = "The apply role. Trusts the OIDC token from the protected GitHub environment."
+  value       = aws_iam_role.this["apply"]
+}
+
+output "plan_role_arn" {
+  description = "ARN of the plan role, for aws-actions/configure-aws-credentials role-to-assume."
+  value       = aws_iam_role.this["plan"].arn
+}
+
+output "apply_role_arn" {
+  description = "ARN of the apply role, for aws-actions/configure-aws-credentials role-to-assume."
+  value       = aws_iam_role.this["apply"].arn
+}
+
+output "subjects" {
+  description = "The exact OIDC subject each role trusts."
+  value       = { for k, r in local.roles : k => r.subject }
 }

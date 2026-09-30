@@ -8,13 +8,16 @@ The module creates a OpenID Connect provider for GitHub. See for directions the 
 <!-- BEGINNING OF PRE-COMMIT-TERRAFORM DOCS HOOK -->
 ## Requirements
 
-No requirements.
+| Name | Version |
+|------|---------|
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.3 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 6.0 |
 
 ## Providers
 
 | Name | Version |
 |------|---------|
-| <a name="provider_aws"></a> [aws](#provider\_aws) | n/a |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | ~> 6.0 |
 
 ## Modules
 
@@ -30,12 +33,13 @@ No modules.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
-| <a name="input_tags"></a> [tags](#input\_tags) | A map of tags to add to OIDC identity provider. | `map(string)` | `{}` | no |
-| <a name="input_thumbprint_list"></a> [thumbprint\_list](#input\_thumbprint\_list) | (Optional) A list of server certificate thumbprints for the OpenID Connect (OIDC) identity provider's server certificate(s). | `list(string)` | <pre>[<br>  "6938fd4d98bab03faadb97b34396831e3780aea1",<br>  "1c58a3a8518e8759bf075b76b750d4f2df264fcd"<br>]</pre> | no |
+| <a name="input_thumbprint_list"></a> [thumbprint\_list](#input\_thumbprint\_list) | (Optional) Server certificate thumbprints for the OIDC provider. Leave null to let AWS manage the certificate chain automatically (recommended). | `list(string)` | `null` | no |
+| <a name="input_tags"></a> [tags](#input\_tags) | A map of tags to add to the OIDC identity provider. | `map(string)` | `{}` | no |
 
 ## Outputs
 
 | Name | Description |
 |------|-------------|
-| <a name="output_openid_connect_provider"></a> [openid\_connect\_provider](#output\_openid\_connect\_provider) | AWS OpenID Connected identity provider. |
+| <a name="output_arn"></a> [arn](#output\_arn) | ARN of the OIDC provider, to pass as openid\_connect\_provider\_arn to the root module. |
+| <a name="output_openid_connect_provider"></a> [openid\_connect\_provider](#output\_openid\_connect\_provider) | AWS OpenID Connect identity provider for GitHub Actions. |
 <!-- END OF PRE-COMMIT-TERRAFORM DOCS HOOK -->
