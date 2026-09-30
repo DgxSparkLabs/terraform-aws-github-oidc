@@ -1,71 +1,40 @@
-resource "random_string" "random" {
-  count = var.role_name == null ? 1 : 0
-
-  length  = 8
-  lower   = true
-  special = false
-}
-
 locals {
-  github_environments = (length(var.github_environments) > 0 && var.repo != null) ? [for e in var.github_environments : "repo:${var.repo}:environment:${e}"] : ["ensurethereisnotmatch"]
-  role_name           = (var.repo != null && var.role_name != null) ? var.role_name : "${substr(replace(var.repo != null ? var.repo : "", "/", "-"), 0, 64 - 8)}-${random_string.random[0].id}"
+  # Immutable OIDC subject prefix: repo:<owner>@<owner_id>/<repo>@<repo_id>
+  # (GitHub Actions immutable subject claim, delimiter "@").
+  subject_prefix = "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}"
 
-  variable_sub = "${var.github_oidc_issuer}:sub"
-
-  default_allow_main = contains(var.default_conditions, "allow_main") ? [{
-    test     = "StringLike"
-    variable = local.variable_sub
-    values   = ["repo:${var.repo}:ref:refs/heads/${var.repo_mainline_branch}"]
-  }] : []
-
-  default_allow_environment = contains(var.default_conditions, "allow_environment") ? [{
-    test     = "StringLike"
-    variable = local.variable_sub
-    values   = local.github_environments
-  }] : []
-
-  default_allow_all = contains(var.default_conditions, "allow_all") ? [{
-    test     = "StringLike"
-    variable = local.variable_sub
-    values   = ["repo:${var.repo}:*"]
-  }] : []
-
-  default_deny_pull_request = contains(var.default_conditions, "deny_pull_request") ? [{
-    test     = "StringNotLike"
-    variable = local.variable_sub
-    values   = ["repo:${var.repo}:pull_request"]
-  }] : []
-
-  conditions = setunion(local.default_allow_main, local.default_allow_environment, local.default_allow_all, local.default_deny_pull_request, var.conditions)
-  merge_conditions = [
-    for k, v in { for c in local.conditions : "${c.test}|${c.variable}" => c... } : # group by test & variable
-    {
-      "test" : k,
-      "values" : flatten([for index, sp in v[*].values : v[index].values if v[index].variable == v[0].variable]) # loop again to build the values inner map
+  roles = {
+    plan = {
+      name        = coalesce(var.plan_role_name, "${var.github_repo}-plan")
+      subject     = "${local.subject_prefix}:ref:refs/heads/${var.mainline_branch}"
+      policy_arns = var.plan_role_policy_arns
     }
-  ]
-
-  root_principal_arns   = [for acc in var.account_ids : "arn:aws:iam::${acc}:root"]
-  merged_principal_arns = concat(local.root_principal_arns, var.custom_principal_arns)
-}
-
-data "aws_iam_policy_document" "github_actions_assume_role_policy" {
-  count = var.repo != null ? 1 : 0
-
-  dynamic "statement" {
-    for_each = length(local.merged_principal_arns) > 0 ? [1] : []
-    content {
-      actions = ["sts:AssumeRole"]
-
-      principals {
-        type        = "AWS"
-        identifiers = local.merged_principal_arns
-      }
+    apply = {
+      name        = coalesce(var.apply_role_name, "${var.github_repo}-apply")
+      subject     = "${local.subject_prefix}:environment:${var.apply_environment}"
+      policy_arns = var.apply_role_policy_arns
     }
   }
 
+  # Flatten per-role policy attachments into a single keyed map. Key by index,
+  # not by ARN: the ARN is often a computed value (e.g. aws_iam_policy.x.arn
+  # created in the same config), and for_each keys must be known at plan time.
+  policy_attachments = merge([
+    for role_key, role in local.roles : {
+      for idx, arn in role.policy_arns :
+      "${role_key}|${idx}" => { role_key = role_key, policy_arn = arn }
+    }
+  ]...)
+}
+
+data "aws_iam_policy_document" "assume_role" {
+  for_each = local.roles
+
   statement {
+    sid     = "GithubActionsOidc"
+    effect  = "Allow"
     actions = ["sts:AssumeRoleWithWebIdentity"]
+
     principals {
       type        = "Federated"
       identifiers = [var.openid_connect_provider_arn]
@@ -77,31 +46,44 @@ data "aws_iam_policy_document" "github_actions_assume_role_policy" {
       values   = ["sts.amazonaws.com"]
     }
 
-    dynamic "condition" {
-      for_each = local.merge_conditions
+    condition {
+      test     = "StringEquals"
+      variable = "${var.github_oidc_issuer}:sub"
+      values   = [each.value.subject]
+    }
 
+    dynamic "condition" {
+      for_each = var.additional_trust_conditions
       content {
-        test     = split("|", condition.value.test)[0]
-        variable = split("|", condition.value.test)[1]
+        test     = condition.value.test
+        variable = condition.value.variable
         values   = condition.value.values
       }
     }
   }
 }
 
-resource "aws_iam_role" "main" {
-  count = var.repo != null ? 1 : 0
+resource "aws_iam_role" "this" {
+  for_each = local.roles
 
-  name                 = local.role_name
+  name                 = each.value.name
   path                 = var.role_path
   permissions_boundary = var.role_permissions_boundary
-  assume_role_policy   = data.aws_iam_policy_document.github_actions_assume_role_policy[0].json
   max_session_duration = var.role_max_session_duration
+  assume_role_policy   = data.aws_iam_policy_document.assume_role[each.key].json
+  tags                 = var.tags
+
+  lifecycle {
+    precondition {
+      condition     = length(each.value.name) <= 64
+      error_message = "IAM role name exceeds the 64-character limit. Set plan_role_name / apply_role_name to a shorter value."
+    }
+  }
 }
 
-resource "aws_iam_role_policy_attachment" "custom" {
-  count = length(var.role_policy_arns)
+resource "aws_iam_role_policy_attachment" "this" {
+  for_each = local.policy_attachments
 
-  role       = join("", aws_iam_role.main.*.name)
-  policy_arn = var.role_policy_arns[count.index]
+  role       = aws_iam_role.this[each.value.role_key].name
+  policy_arn = each.value.policy_arn
 }

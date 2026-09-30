@@ -1,0 +1,66 @@
+# Example consumer workflow for the two roles this module creates.
+#
+# Trust model (must match how the workflow runs):
+#   - plan role  trusts  repo:<owner>@<id>/<repo>@<id>:ref:refs/heads/<mainline_branch>
+#                        -> assumable only from a push to the mainline branch.
+#   - apply role trusts  repo:<owner>@<id>/<repo>@<id>:environment:<apply_environment>
+#                        -> assumable only from a job bound to that GitHub environment.
+#
+# Wire the module outputs into repository/organization Actions *variables*
+# (role ARNs are not secret):
+#   AWS_PLAN_ROLE_ARN  = module.github_oidc.plan_role_arn
+#   AWS_APPLY_ROLE_ARN = module.github_oidc.apply_role_arn
+
+name: terraform
+
+on:
+  push:
+    branches: [main] # matches the plan role's ref:refs/heads/main subject
+
+permissions:
+  contents: read
+  id-token: write # required so GitHub will mint the OIDC token
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume the plan role (read-only)
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          role-session-name: gh-plan
+          aws-region: eu-west-1
+
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform init
+      - run: terraform plan -out=tfplan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: tfplan
+
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    # The apply role only trusts this environment's OIDC subject.
+    # Protect it with required reviewers so the apply gates on human approval.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume the apply role (write)
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          role-session-name: gh-apply
+          aws-region: eu-west-1
+
+      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+      - run: terraform init
+      - run: terraform apply tfplan # applies exactly the saved plan; -auto-approve is implied

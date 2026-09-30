@@ -1,31 +1,34 @@
-# Managing multiple repo's for a single AWS account
+# Plan / apply roles for a single repository
 
-The module provides an example how to setup roles to to use with OIDC for multiple repositories.
+This example creates the GitHub Actions OIDC provider (once per AWS account) and
+two roles for one repository:
 
-- A repository with some access to S3 (same as in the [single example](../single-repo/README.md))
-- A repository with access to ECR with the tag `allow-gh-action-access`
-- Environment for ECR repo (requires a paid GitHub subscription)
+- a **plan** role, assumable only from the mainline branch
+  (`refs/heads/<mainline_branch>`);
+- an **apply** role, assumable from the configured GitHub **environment** —
+  which you must protect separately (required reviewers + deployment-branch
+  rules); the trust policy itself does not check the branch.
 
-## Usages
+Both trust an exact, immutable OIDC subject
+(`repo:<owner>@<owner_id>/<repo>@<repo_id>:...`). The module owns no permissions:
+attach them externally via `plan_role_policy_arns` / `apply_role_policy_arns`.
 
-Create a GitHub repositories (private) for S3 and ECR and set the variable `repo` to the name of your created repo. Add as secret `AWS_ACCOUNT_ID` and set the value to your account.
+## Usage
+
+Set your repository's owner/repo names and their immutable numeric IDs, then:
 
 ```bash
 terraform init
 terraform apply
 ```
 
-For the S3 repository follow the directions in the single example. On the console the name of the ECR repo and role are printed. Next update [workflow](../repositories/.github/workflows/../../repo-ecr/.github/workflows/ecr.yml) for the repo and role. Add, commit and push. The job should now push a busybox container to your ECR repo.
-
-Finally you can clean up with `terraform destroy`
-
-## Required GitHub Workflows Permissions
-
-When configuring GitHub workflows to use this module, you need to specify the following permissions in your workflow configuration:
+Wire the resulting ARNs into `aws-actions/configure-aws-credentials` in your
+workflows. Each deployment job needs:
 
 ```yaml
 permissions:
   id-token: write
+  contents: read
 ```
 
-This permission is required for the GitHub Actions to be able to assume the IAM role created by this module.
+Clean up with `terraform destroy`.
