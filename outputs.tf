@@ -19,6 +19,6 @@ output "apply_role_arn" {
 }
 
 output "subjects" {
-  description = "The exact OIDC subject each role trusts."
-  value       = { for k, r in local.roles : k => r.subject }
+  description = "The exact OIDC subjects each role trusts."
+  value       = { for k, r in local.roles : k => r.subjects }
 }

@@ -5,6 +5,9 @@
 #                        -> assumable only from a push to the mainline branch.
 #   - apply role trusts  repo:<owner>@<id>/<repo>@<id>:environment:<apply_environment>
 #                        -> assumable only from a job bound to that GitHub environment.
+#   - When plan_trusts_pull_requests = true, the plan role ALSO trusts
+#     repo:<owner>@<id>/<repo>@<id>:pull_request, so the plan job below can run
+#     on pull_request events -- but only while that job sets no environment:.
 #
 # Wire the module outputs into repository/organization Actions *variables*
 # (role ARNs are not secret):
@@ -16,6 +19,11 @@ name: terraform
 on:
   push:
     branches: [main] # matches the plan role's ref:refs/heads/main subject
+  # Opt-in plan-on-PR: uncomment to also run the *plan* job on pull requests.
+  # Requires plan_trusts_pull_requests = true on the module. Fork PRs are not
+  # granted id-token:write by default, so they cannot mint a token (unless an
+  # admin overrides). The apply job below stays push-only regardless.
+  # pull_request:
 
 permissions:
   contents: read
@@ -45,8 +53,13 @@ jobs:
   apply:
     needs: plan
     runs-on: ubuntu-latest
-    # The apply role only trusts this environment's OIDC subject.
-    # Protect it with required reviewers so the apply gates on human approval.
+    # Never run apply on pull requests: a job that sets environment: gets the
+    # :environment:<name> subject, which matches the WRITE apply role. Gating on
+    # push keeps the write role unreachable from PRs even if plan-on-PR is on.
+    if: github.event_name == 'push'
+    # The apply role trusts this environment's subject (no branch component).
+    # Protect it with required reviewers AND deployment-branch restrictions
+    # (limit to the mainline branch); the trust policy is not branch-scoped.
     environment: production
     steps:
       - uses: actions/checkout@v4

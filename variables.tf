@@ -45,6 +45,12 @@ variable "mainline_branch" {
   default     = "main"
 }
 
+variable "plan_trusts_pull_requests" {
+  description = "(Optional) Also allow the plan role to be assumed from pull_request workflow runs, so PRs can compute a plan. Because AWS can only match sub/aud (not base_ref/event_name), this trusts EVERY same-repo pull request on any base branch, so keep the plan role strictly read-only. The module does not distinguish forks: a fork PR's token carries the base repo's :pull_request subject and would match. GitHub withholds id-token:write from fork PRs by default (an org/repo admin can enable it, after which forks can assume this role). Only takes effect for plan jobs that set no environment:. Default false."
+  type        = bool
+  default     = false
+}
+
 variable "apply_environment" {
   description = "GitHub Actions environment the apply role is allowed to assume from. Matched exactly on the OIDC subject. Protect this environment with required reviewers so applies gate on human approval."
   type        = string
