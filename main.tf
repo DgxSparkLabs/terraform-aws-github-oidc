@@ -5,13 +5,19 @@ locals {
 
   roles = {
     plan = {
-      name        = coalesce(var.plan_role_name, "${var.github_repo}-plan")
-      subject     = "${local.subject_prefix}:ref:refs/heads/${var.mainline_branch}"
+      name = coalesce(var.plan_role_name, "${var.github_repo}-plan")
+      # Exact mainline-branch subject, plus an optional pull_request subject.
+      # NOTE: AWS can only match sub/aud (no base_ref/event_name), so the
+      # pull_request value trusts EVERY same-repo PR on any base branch.
+      subjects = concat(
+        ["${local.subject_prefix}:ref:refs/heads/${var.mainline_branch}"],
+        var.plan_trusts_pull_requests ? ["${local.subject_prefix}:pull_request"] : [],
+      )
       policy_arns = var.plan_role_policy_arns
     }
     apply = {
       name        = coalesce(var.apply_role_name, "${var.github_repo}-apply")
-      subject     = "${local.subject_prefix}:environment:${var.apply_environment}"
+      subjects    = ["${local.subject_prefix}:environment:${var.apply_environment}"]
       policy_arns = var.apply_role_policy_arns
     }
   }
@@ -49,7 +55,7 @@ data "aws_iam_policy_document" "assume_role" {
     condition {
       test     = "StringEquals"
       variable = "${var.github_oidc_issuer}:sub"
-      values   = [each.value.subject]
+      values   = each.value.subjects
     }
 
     dynamic "condition" {
